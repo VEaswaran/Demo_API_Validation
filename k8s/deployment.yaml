@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-api
+  namespace: order-api
+  labels:
+    app: order-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-api
+  template:
+    metadata:
+      labels:
+        app: order-api
+    spec:
+      containers:
+        - name: order-api
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5

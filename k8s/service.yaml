@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-api
+  namespace: order-api
+  labels:
+    app: order-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: order-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,10 @@
+.git
+.gradle
+.idea
+build
+out
+k8s
+*.iml
+*.ps1
+Jenkinsfile
+HELP.md
