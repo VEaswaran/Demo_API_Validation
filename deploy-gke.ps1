@@ -85,10 +85,12 @@ Invoke-Checked { & $gcloud container clusters get-credentials $ClusterName --reg
 if (-not (Test-CommandSuccess { kubectl get namespace $Namespace })) {
     Invoke-Checked { kubectl create namespace $Namespace }
 }
-(Get-Content "$PSScriptRoot\k8s\deployment.yaml" -Raw) -replace "IMAGE_PLACEHOLDER", $image | kubectl apply -n $Namespace -f -
+$Slot = "blue"
+(Get-Content "$PSScriptRoot\k8s\deployment.yaml" -Raw) -replace "IMAGE_PLACEHOLDER", $image -replace "SLOT_PLACEHOLDER", $Slot | kubectl apply -n $Namespace -f -
 if ($LASTEXITCODE -ne 0) { throw "kubectl apply deployment failed" }
-Invoke-Checked { kubectl apply -n $Namespace -f "$PSScriptRoot\k8s\service.yaml" }
-Invoke-Checked { kubectl rollout status deployment/order-api -n $Namespace --timeout=10m }
+(Get-Content "$PSScriptRoot\k8s\service.yaml" -Raw) -replace "SLOT_PLACEHOLDER", $Slot | kubectl apply -n $Namespace -f -
+if ($LASTEXITCODE -ne 0) { throw "kubectl apply service failed" }
+Invoke-Checked { kubectl rollout status "deployment/order-api-$Slot" -n $Namespace --timeout=10m }
 
 Write-Host "==> Waiting for external IP"
 $ip = ""

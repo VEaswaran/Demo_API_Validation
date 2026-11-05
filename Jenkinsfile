@@ -5,7 +5,6 @@ pipeline {
         string(name: 'GCP_PROJECT_ID', defaultValue: 'project-d7b18774-cce1-4b87-a4a', description: 'GCP Project ID')
         string(name: 'GCP_REGION', defaultValue: 'us-central1', description: 'GCP Region')
         string(name: 'GKE_CLUSTER', defaultValue: 'order-api-cluster', description: 'GKE Cluster Name')
-        choice(name: 'ENVIRONMENT', choices: ['dev1', 'dev2'], description: 'Target env: dev1 -> order-api ns, dev2 -> order-api-dev2 ns')
         string(name: 'AR_REPO', defaultValue: 'order-api', description: 'Artifact Registry Repository')
         string(name: 'IMAGE_NAME', defaultValue: 'order-api', description: 'Container Image Name')
     }
@@ -14,7 +13,8 @@ pipeline {
         IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'latest'}"
         IMAGE_URI = "${params.GCP_REGION}-docker.pkg.dev/${params.GCP_PROJECT_ID}/${params.AR_REPO}/${params.IMAGE_NAME}:${IMAGE_TAG}"
         USE_GKE_GCLOUD_AUTH_PLUGIN = 'True'
-        K8S_NS = "${params.ENVIRONMENT == 'dev2' ? 'order-api-dev2' : 'order-api'}"
+        DEV1_NS = 'order-api-dev1'
+        DEV2_NS = 'order-api-dev2'
     }
 
     stages {
@@ -90,7 +90,7 @@ pipeline {
                                 -ProjectId '${params.GCP_PROJECT_ID}' `
                                 -Region '${params.GCP_REGION}' `
                                 -ClusterName '${params.GKE_CLUSTER}' `
-                                -Namespace '${env.K8S_NS}' `
+                                -Namespace '${env.DEV1_NS}' `
                                 -Repository '${params.AR_REPO}' `
                                 -ImageName '${params.IMAGE_NAME}' `
                                 -Tag '${env.IMAGE_TAG}'
@@ -100,52 +100,105 @@ pipeline {
             }
         }
 
-        stage('Deploy to GKE') {
-            when {
-                expression { return isUnix() }
-            }
+        stage('Deploy to dev1') {
+            when { expression { return isUnix() } }
             steps {
-                sh """
-                    gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID}
-                    kubectl get namespace ${env.K8S_NS} >/dev/null 2>&1 || kubectl create namespace ${env.K8S_NS}
-                    sed "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" k8s/deployment.yaml | kubectl apply -n ${env.K8S_NS} -f -
-                    kubectl apply -n ${env.K8S_NS} -f k8s/service.yaml
-                    kubectl rollout status deployment/order-api -n ${env.K8S_NS} --timeout=10m
-                    kubectl wait --for=condition=ready pod -l app=order-api -n ${env.K8S_NS} --timeout=5m
-                    kubectl get endpoints order-api -n ${env.K8S_NS}
-                    kubectl get service order-api -n ${env.K8S_NS}
-                """
-                script {
-                    env.APP_IP = ''
-                    for (int i = 0; i < 30 && !env.APP_IP; i++) {
-                        env.APP_IP = sh(returnStdout: true,
-                                script: "kubectl get service order-api -n ${env.K8S_NS} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'").trim()
-                        if (!env.APP_IP) { sleep time: 10, unit: 'SECONDS' }
-                    }
-                    if (!env.APP_IP) { error 'LoadBalancer external IP was not assigned in time' }
-                    echo "Service external IP: ${env.APP_IP}"
+                script { deployEnv(env.DEV1_NS) }
+            }
+        }
+
+        stage('Approve Switch Live - dev1') {
+            when { expression { return isUnix() } }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: "dev1 pods Ready on slot ${env.SLOT}. Proceed with SWITCH LIVE?", ok: 'Switch Live'
                 }
             }
         }
 
-        stage('Smoke Test') {
-            when {
-                expression { return isUnix() }
-            }
+        stage('Switch Live - dev1') {
+            when { expression { return isUnix() } }
             steps {
-                sh '''
-                    set -e
-                    healthy=""
-                    for i in $(seq 1 30); do
-                        if curl -fs "http://$APP_IP/actuator/health" 2>/dev/null | grep -q UP; then healthy=1; break; fi
-                        sleep 10
-                    done
-                    [ -n "$healthy" ] || { echo "SMOKE FAILED: /actuator/health never reported UP"; exit 1; }
-                    curl -fs "http://$APP_IP/api/orders/1001" | grep -q '"orderId":1001' \
-                        || { echo "SMOKE FAILED: GET /api/orders/1001"; exit 1; }
-                    echo "SMOKE PASSED: http://$APP_IP/api/orders/1001"
-                '''
+                script { switchLiveAndSmoke(env.DEV1_NS) }
+            }
+        }
+
+        stage('Approve Deploy - dev2') {
+            when { expression { return isUnix() } }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: 'dev1 is live. Proceed with deployment to dev2?', ok: 'Deploy to dev2'
+                }
+            }
+        }
+
+        stage('Deploy to dev2') {
+            when { expression { return isUnix() } }
+            steps {
+                script { deployEnv(env.DEV2_NS) }
+            }
+        }
+
+        stage('Approve Switch Live - dev2') {
+            when { expression { return isUnix() } }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: "dev2 pods Ready on slot ${env.SLOT}. Proceed with SWITCH LIVE?", ok: 'Switch Live'
+                }
+            }
+        }
+
+        stage('Switch Live - dev2') {
+            when { expression { return isUnix() } }
+            steps {
+                script { switchLiveAndSmoke(env.DEV2_NS) }
             }
         }
     }
+}
+
+def activeSlot(String ns) {
+    String live = sh(returnStdout: true,
+            script: "kubectl get service order-api -n ${ns} -o jsonpath='{.spec.selector.slot}' 2>/dev/null || true").trim()
+    return live ?: ''
+}
+
+def deployEnv(String ns) {
+    String live = activeSlot(ns)
+    env.SLOT = live ? (live == 'blue' ? 'green' : 'blue') : 'blue'
+    echo "Deploying slot '${env.SLOT}' to ${ns} (live slot: ${live ?: 'none'})"
+    sh """
+        gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID}
+        kubectl get namespace ${ns} >/dev/null 2>&1 || kubectl create namespace ${ns}
+        sed -e "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" -e "s|SLOT_PLACEHOLDER|${env.SLOT}|g" k8s/deployment.yaml | kubectl apply -n ${ns} -f -
+        kubectl rollout status deployment/order-api-${env.SLOT} -n ${ns} --timeout=10m
+        kubectl wait --for=condition=ready pod -l app=order-api,slot=${env.SLOT} -n ${ns} --timeout=5m
+    """
+}
+
+def switchLiveAndSmoke(String ns) {
+    sh "sed 's|SLOT_PLACEHOLDER|${env.SLOT}|g' k8s/service.yaml | kubectl apply -n ${ns} -f -"
+    String ip = ''
+    for (int i = 0; i < 30 && !ip; i++) {
+        ip = sh(returnStdout: true,
+                script: "kubectl get service order-api -n ${ns} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'").trim()
+        if (!ip) { sleep time: 10, unit: 'SECONDS' }
+    }
+    if (!ip) { error "LoadBalancer IP not assigned for ${ns}" }
+    sh "kubectl get endpoints order-api -n ${ns}"
+    echo "SWITCHED LIVE: ${ns} -> slot ${env.SLOT} @ http://${ip}"
+    sh """
+        set -e
+        healthy=""
+        for i in \$(seq 1 30); do
+            if curl -fs "http://${ip}/actuator/health" 2>/dev/null | grep -q UP; then healthy=1; break; fi
+            sleep 10
+        done
+        [ -n "\$healthy" ] || { echo "SMOKE FAILED: ${ns} /actuator/health"; exit 1; }
+        curl -fs "http://${ip}/api/orders/1001" | grep -q '"orderId":1001' || { echo "SMOKE FAILED: ${ns} /api/orders/1001"; exit 1; }
+        echo "SMOKE PASSED (${ns}): http://${ip}/api/orders/1001"
+    """
+    String oldSlot = env.SLOT == 'blue' ? 'green' : 'blue'
+    sh "kubectl scale deployment order-api-${oldSlot} -n ${ns} --replicas=0 2>/dev/null || true"
+    sh "kubectl scale deployment order-api -n ${ns} --replicas=0 2>/dev/null || true"
 }
