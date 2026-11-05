@@ -103,15 +103,18 @@ pipeline {
         stage('Deploy to dev1') {
             when { expression { return isUnix() } }
             steps {
-                script { deployEnv(env.DEV1_NS) }
+                script { deployEnv(env.DEV1_NS, 'DEV1') }
             }
         }
 
         stage('Approve Switch Live - dev1') {
             when { expression { return isUnix() } }
             steps {
-                timeout(time: 15, unit: 'MINUTES') {
-                    input message: 'dev1 new version staged (rollout paused). Proceed with SWITCH LIVE? Old pod goes down, new pod takes over.', ok: 'Switch Live'
+                script {
+                    String msg = "[dev1 / ${env.DEV1_NS}] LIVE: ${env.DEV1_LIVE_IMG}  ->  NEW: ${env.IMAGE_URI}  @ http://${env.DEV1_LB_IP} . Approve = old pod stops, new pod starts."
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: msg, ok: 'Switch Live'
+                    }
                 }
             }
         }
@@ -126,8 +129,11 @@ pipeline {
         stage('Approve Deploy - dev2') {
             when { expression { return isUnix() } }
             steps {
-                timeout(time: 15, unit: 'MINUTES') {
-                    input message: 'dev1 is live. Proceed with deployment to dev2?', ok: 'Deploy to dev2'
+                script {
+                    String msg = "dev1 is live @ http://${env.DEV1_LB_IP}. Deploy ${env.IMAGE_URI} to dev2 / ${env.DEV2_NS} (currently: ${env.DEV2_LIVE_IMG ?: 'not deployed yet'})?"
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: msg, ok: 'Deploy to dev2'
+                    }
                 }
             }
         }
@@ -135,15 +141,18 @@ pipeline {
         stage('Deploy to dev2') {
             when { expression { return isUnix() } }
             steps {
-                script { deployEnv(env.DEV2_NS) }
+                script { deployEnv(env.DEV2_NS, 'DEV2') }
             }
         }
 
         stage('Approve Switch Live - dev2') {
             when { expression { return isUnix() } }
             steps {
-                timeout(time: 15, unit: 'MINUTES') {
-                    input message: 'dev2 new version staged (rollout paused). Proceed with SWITCH LIVE? Old pod goes down, new pod takes over.', ok: 'Switch Live'
+                script {
+                    String msg = "[dev2 / ${env.DEV2_NS}] LIVE: ${env.DEV2_LIVE_IMG}  ->  NEW: ${env.IMAGE_URI}  @ http://${env.DEV2_LB_IP} . Approve = old pod stops, new pod starts."
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: msg, ok: 'Switch Live'
+                    }
                 }
             }
         }
@@ -157,10 +166,16 @@ pipeline {
     }
 }
 
-def deployEnv(String ns) {
-    echo "Staging ${env.IMAGE_URI} into ${ns} (rollout paused - current pod keeps serving until approval)"
+def deployEnv(String ns, String label) {
+    sh "gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID} -q"
+    String liveImg = sh(returnStdout: true,
+            script: "kubectl get deployment order-api -n ${ns} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true").trim()
+    String lbIp = sh(returnStdout: true,
+            script: "kubectl get service order-api -n ${ns} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true").trim()
+    env."${label}_LIVE_IMG" = liveImg ?: 'none'
+    env."${label}_LB_IP" = lbIp ?: 'pending'
+    echo "[${label}] ns=${ns} | LIVE: ${liveImg ?: 'none'} | STAGING: ${env.IMAGE_URI} | URL: http://${lbIp ?: 'pending'}"
     sh """
-        gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID}
         kubectl get namespace ${ns} >/dev/null 2>&1 || kubectl create namespace ${ns}
         kubectl rollout resume deployment/order-api -n ${ns} 2>/dev/null || true
         kubectl rollout pause deployment/order-api -n ${ns} 2>/dev/null || true
@@ -196,4 +211,5 @@ def switchLiveAndSmoke(String ns) {
         curl -fs "http://${ip}/api/orders/1001" | grep -q '"orderId":1001' || { echo "SMOKE FAILED: ${ns} /api/orders/1001"; exit 1; }
         echo "SMOKE PASSED (${ns}): http://${ip}/api/orders/1001"
     """
+    currentBuild.description = (currentBuild.description ? currentBuild.description + ' | ' : '') + "${ns}: http://${ip}"
 }
