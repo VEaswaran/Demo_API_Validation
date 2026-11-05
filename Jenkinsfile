@@ -23,7 +23,7 @@ pipeline {
             }
         }
 
-        stage('Test') {
+        stage('Unit Tests') {
             steps {
                 script {
                     if (isUnix()) {
@@ -36,6 +36,40 @@ pipeline {
             post {
                 always {
                     junit allowEmptyResults: true, testResults: 'build/test-results/test/*.xml'
+                }
+            }
+        }
+
+        stage('Integration Tests') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh './gradlew integrationTest --no-daemon'
+                    } else {
+                        bat 'gradlew.bat integrationTest --no-daemon'
+                    }
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'build/test-results/integrationTest/*.xml'
+                }
+            }
+        }
+
+        stage('Coverage Gate') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh './gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon'
+                    } else {
+                        bat 'gradlew.bat jacocoTestReport jacocoTestCoverageVerification --no-daemon'
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'build/reports/jacoco/test/html/**', allowEmptyArchive: true
                 }
             }
         }
@@ -78,6 +112,36 @@ pipeline {
                     kubectl rollout status deployment/order-api -n ${params.K8S_NAMESPACE} --timeout=10m
                     kubectl get service order-api -n ${params.K8S_NAMESPACE}
                 """
+                script {
+                    env.APP_IP = ''
+                    for (int i = 0; i < 30 && !env.APP_IP; i++) {
+                        env.APP_IP = sh(returnStdout: true,
+                                script: "kubectl get service order-api -n ${params.K8S_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'").trim()
+                        if (!env.APP_IP) { sleep time: 10, unit: 'SECONDS' }
+                    }
+                    if (!env.APP_IP) { error 'LoadBalancer external IP was not assigned in time' }
+                    echo "Service external IP: ${env.APP_IP}"
+                }
+            }
+        }
+
+        stage('Smoke Test') {
+            when {
+                expression { return isUnix() }
+            }
+            steps {
+                sh '''
+                    set -e
+                    healthy=""
+                    for i in $(seq 1 30); do
+                        if curl -fs "http://$APP_IP/actuator/health" 2>/dev/null | grep -q UP; then healthy=1; break; fi
+                        sleep 10
+                    done
+                    [ -n "$healthy" ] || { echo "SMOKE FAILED: /actuator/health never reported UP"; exit 1; }
+                    curl -fs "http://$APP_IP/api/orders/1001" | grep -q '"orderId":1001' \
+                        || { echo "SMOKE FAILED: GET /api/orders/1001"; exit 1; }
+                    echo "SMOKE PASSED: http://$APP_IP/api/orders/1001"
+                '''
             }
         }
     }
