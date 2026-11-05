@@ -96,8 +96,8 @@ Invoke-Checked { kubectl rollout status "deployment/order-api-$Slot" -n $Namespa
 (Get-Content "$PSScriptRoot\k8s\service.yaml" -Raw) -replace "SLOT_PLACEHOLDER", $Slot | kubectl apply -n $Namespace -f -
 if ($LASTEXITCODE -ne 0) { throw "kubectl apply service failed" }
 if ($liveSlot -and $liveSlot -ne $Slot) {
-    Write-Host "==> Traffic switched to slot '$Slot'; scaling down old slot '$liveSlot'"
-    Invoke-Checked { kubectl scale deployment "order-api-$liveSlot" -n $Namespace --replicas=0 }
+    Write-Host "==> Traffic switched to slot '$Slot'; removing old slot '$liveSlot' deployment"
+    Invoke-Checked { kubectl delete deployment "order-api-$liveSlot" -n $Namespace --ignore-not-found }
 }
 
 Write-Host "==> Waiting for external IP"

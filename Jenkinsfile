@@ -230,8 +230,8 @@ def switchLiveAndSmoke(String ns, String label) {
         echo "SMOKE PASSED (${ns}): http://${ip}/api/orders/1001"
     """
     if (oldSlot && oldSlot != 'none') {
-        sh "kubectl scale deployment order-api-${oldSlot} -n ${ns} --replicas=0"
-        echo "[${label}] Old slot '${oldSlot}' scaled to 0 - only '${target}' pod is running"
+        sh "kubectl delete deployment order-api-${oldSlot} -n ${ns} --ignore-not-found"
+        echo "[${label}] Old slot '${oldSlot}' deployment removed - only '${target}' remains running"
     }
     currentBuild.description = (currentBuild.description ? currentBuild.description + ' | ' : '') + "${ns} slot=${target}: http://${ip}"
 }
