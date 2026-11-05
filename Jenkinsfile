@@ -126,6 +126,17 @@ pipeline {
             }
         }
 
+        stage('Security Scan - dev1') {
+            when { expression { return isUnix() } }
+            steps {
+                script {
+                    echo "Triggering independent scan job 'order-api-snyk-scan' for ${env.IMAGE_URI} - must pass before dev2"
+                    build job: 'order-api-snyk-scan', wait: true, propagate: true,
+                          parameters: [string(name: 'IMAGE_URI', value: env.IMAGE_URI)]
+                }
+            }
+        }
+
         stage('Approve Deploy - dev2') {
             when { expression { return isUnix() } }
             steps {
