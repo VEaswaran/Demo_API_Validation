@@ -111,7 +111,7 @@ pipeline {
             when { expression { return isUnix() } }
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
-                    input message: "dev1 pods Ready on slot ${env.SLOT}. Proceed with SWITCH LIVE?", ok: 'Switch Live'
+                    input message: 'dev1 new version staged (rollout paused). Proceed with SWITCH LIVE? Old pod goes down, new pod takes over.', ok: 'Switch Live'
                 }
             }
         }
@@ -143,7 +143,7 @@ pipeline {
             when { expression { return isUnix() } }
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
-                    input message: "dev2 pods Ready on slot ${env.SLOT}. Proceed with SWITCH LIVE?", ok: 'Switch Live'
+                    input message: 'dev2 new version staged (rollout paused). Proceed with SWITCH LIVE? Old pod goes down, new pod takes over.', ok: 'Switch Live'
                 }
             }
         }
@@ -157,27 +157,26 @@ pipeline {
     }
 }
 
-def activeSlot(String ns) {
-    String live = sh(returnStdout: true,
-            script: "kubectl get service order-api -n ${ns} -o jsonpath='{.spec.selector.slot}' 2>/dev/null || true").trim()
-    return live ?: ''
-}
-
 def deployEnv(String ns) {
-    String live = activeSlot(ns)
-    env.SLOT = live ? (live == 'blue' ? 'green' : 'blue') : 'blue'
-    echo "Deploying slot '${env.SLOT}' to ${ns} (live slot: ${live ?: 'none'})"
+    echo "Staging ${env.IMAGE_URI} into ${ns} (rollout paused - current pod keeps serving until approval)"
     sh """
         gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID}
         kubectl get namespace ${ns} >/dev/null 2>&1 || kubectl create namespace ${ns}
-        sed -e "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" -e "s|SLOT_PLACEHOLDER|${env.SLOT}|g" k8s/deployment.yaml | kubectl apply -n ${ns} -f -
-        kubectl rollout status deployment/order-api-${env.SLOT} -n ${ns} --timeout=10m
-        kubectl wait --for=condition=ready pod -l app=order-api,slot=${env.SLOT} -n ${ns} --timeout=5m
+        kubectl rollout resume deployment/order-api -n ${ns} 2>/dev/null || true
+        kubectl rollout pause deployment/order-api -n ${ns} 2>/dev/null || true
+        sed "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" k8s/deployment.yaml | kubectl apply -n ${ns} -f -
+        kubectl apply -n ${ns} -f k8s/service.yaml
+        kubectl get deployment order-api -n ${ns} -o wide
     """
 }
 
 def switchLiveAndSmoke(String ns) {
-    sh "sed 's|SLOT_PLACEHOLDER|${env.SLOT}|g' k8s/service.yaml | kubectl apply -n ${ns} -f -"
+    sh "kubectl rollout resume deployment/order-api -n ${ns} || true"
+    sh """
+        kubectl rollout status deployment/order-api -n ${ns} --timeout=10m
+        kubectl wait --for=condition=ready pod -l app=order-api -n ${ns} --timeout=5m
+        kubectl get endpoints order-api -n ${ns}
+    """
     String ip = ''
     for (int i = 0; i < 30 && !ip; i++) {
         ip = sh(returnStdout: true,
@@ -185,8 +184,7 @@ def switchLiveAndSmoke(String ns) {
         if (!ip) { sleep time: 10, unit: 'SECONDS' }
     }
     if (!ip) { error "LoadBalancer IP not assigned for ${ns}" }
-    sh "kubectl get endpoints order-api -n ${ns}"
-    echo "SWITCHED LIVE: ${ns} -> slot ${env.SLOT} @ http://${ip}"
+    echo "SWITCHED LIVE: ${ns} -> ${env.IMAGE_URI} @ http://${ip}"
     sh """
         set -e
         healthy=""
@@ -198,7 +196,4 @@ def switchLiveAndSmoke(String ns) {
         curl -fs "http://${ip}/api/orders/1001" | grep -q '"orderId":1001' || { echo "SMOKE FAILED: ${ns} /api/orders/1001"; exit 1; }
         echo "SMOKE PASSED (${ns}): http://${ip}/api/orders/1001"
     """
-    String oldSlot = env.SLOT == 'blue' ? 'green' : 'blue'
-    sh "kubectl scale deployment order-api-${oldSlot} -n ${ns} --replicas=0 2>/dev/null || true"
-    sh "kubectl scale deployment order-api -n ${ns} --replicas=0 2>/dev/null || true"
 }

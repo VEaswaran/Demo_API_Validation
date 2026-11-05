@@ -1,21 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: order-api-SLOT_PLACEHOLDER
+  name: order-api
   labels:
     app: order-api
-    slot: SLOT_PLACEHOLDER
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: order-api
-      slot: SLOT_PLACEHOLDER
   template:
     metadata:
       labels:
         app: order-api
-        slot: SLOT_PLACEHOLDER
     spec:
       containers:
         - name: order-api
