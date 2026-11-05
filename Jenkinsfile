@@ -5,7 +5,7 @@ pipeline {
         string(name: 'GCP_PROJECT_ID', defaultValue: 'project-d7b18774-cce1-4b87-a4a', description: 'GCP Project ID')
         string(name: 'GCP_REGION', defaultValue: 'us-central1', description: 'GCP Region')
         string(name: 'GKE_CLUSTER', defaultValue: 'order-api-cluster', description: 'GKE Cluster Name')
-        string(name: 'K8S_NAMESPACE', defaultValue: 'order-api', description: 'Kubernetes Namespace')
+        choice(name: 'ENVIRONMENT', choices: ['dev1', 'dev2'], description: 'Target env: dev1 -> order-api ns, dev2 -> order-api-dev2 ns')
         string(name: 'AR_REPO', defaultValue: 'order-api', description: 'Artifact Registry Repository')
         string(name: 'IMAGE_NAME', defaultValue: 'order-api', description: 'Container Image Name')
     }
@@ -14,6 +14,7 @@ pipeline {
         IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'latest'}"
         IMAGE_URI = "${params.GCP_REGION}-docker.pkg.dev/${params.GCP_PROJECT_ID}/${params.AR_REPO}/${params.IMAGE_NAME}:${IMAGE_TAG}"
         USE_GKE_GCLOUD_AUTH_PLUGIN = 'True'
+        K8S_NS = "${params.ENVIRONMENT == 'dev2' ? 'order-api-dev2' : 'order-api'}"
     }
 
     stages {
@@ -89,7 +90,7 @@ pipeline {
                                 -ProjectId '${params.GCP_PROJECT_ID}' `
                                 -Region '${params.GCP_REGION}' `
                                 -ClusterName '${params.GKE_CLUSTER}' `
-                                -Namespace '${params.K8S_NAMESPACE}' `
+                                -Namespace '${env.K8S_NS}' `
                                 -Repository '${params.AR_REPO}' `
                                 -ImageName '${params.IMAGE_NAME}' `
                                 -Tag '${env.IMAGE_TAG}'
@@ -106,17 +107,19 @@ pipeline {
             steps {
                 sh """
                     gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID}
-                    kubectl get namespace ${params.K8S_NAMESPACE} >/dev/null 2>&1 || kubectl create namespace ${params.K8S_NAMESPACE}
-                    sed "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" k8s/deployment.yaml | kubectl apply -n ${params.K8S_NAMESPACE} -f -
-                    kubectl apply -n ${params.K8S_NAMESPACE} -f k8s/service.yaml
-                    kubectl rollout status deployment/order-api -n ${params.K8S_NAMESPACE} --timeout=10m
-                    kubectl get service order-api -n ${params.K8S_NAMESPACE}
+                    kubectl get namespace ${env.K8S_NS} >/dev/null 2>&1 || kubectl create namespace ${env.K8S_NS}
+                    sed "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" k8s/deployment.yaml | kubectl apply -n ${env.K8S_NS} -f -
+                    kubectl apply -n ${env.K8S_NS} -f k8s/service.yaml
+                    kubectl rollout status deployment/order-api -n ${env.K8S_NS} --timeout=10m
+                    kubectl wait --for=condition=ready pod -l app=order-api -n ${env.K8S_NS} --timeout=5m
+                    kubectl get endpoints order-api -n ${env.K8S_NS}
+                    kubectl get service order-api -n ${env.K8S_NS}
                 """
                 script {
                     env.APP_IP = ''
                     for (int i = 0; i < 30 && !env.APP_IP; i++) {
                         env.APP_IP = sh(returnStdout: true,
-                                script: "kubectl get service order-api -n ${params.K8S_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'").trim()
+                                script: "kubectl get service order-api -n ${env.K8S_NS} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'").trim()
                         if (!env.APP_IP) { sleep time: 10, unit: 'SECONDS' }
                     }
                     if (!env.APP_IP) { error 'LoadBalancer external IP was not assigned in time' }

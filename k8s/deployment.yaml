@@ -2,11 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: order-api
-  namespace: order-api
   labels:
     app: order-api
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: order-api
