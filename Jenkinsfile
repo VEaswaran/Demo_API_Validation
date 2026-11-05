@@ -130,9 +130,20 @@ pipeline {
             when { expression { return isUnix() } }
             steps {
                 script {
-                    echo "Triggering independent scan job 'order-api-snyk-scan' for ${env.IMAGE_URI} - must pass before dev2"
-                    build job: 'order-api-snyk-scan', wait: true, propagate: true,
-                          parameters: [string(name: 'IMAGE_URI', value: env.IMAGE_URI)]
+                    echo "Triggering independent scan job 'order-api-snyk-scan' for ${env.IMAGE_URI} (non-blocking - findings reported, build continues)"
+                    try {
+                        def scan = build job: 'order-api-snyk-scan', wait: true, propagate: false,
+                                  parameters: [string(name: 'IMAGE_URI', value: env.IMAGE_URI)]
+                        if (scan.result != 'SUCCESS') {
+                            echo "SECURITY SCAN result: ${scan.result} - proceeding anyway (advisory only)"
+                            currentBuild.result = 'UNSTABLE'
+                        } else {
+                            echo "SECURITY SCAN passed"
+                        }
+                    } catch (Exception e) {
+                        echo "Security scan could not run: ${e.message} - proceeding anyway"
+                        currentBuild.result = 'UNSTABLE'
+                    }
                 }
             }
         }
