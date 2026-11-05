@@ -111,7 +111,7 @@ pipeline {
             when { expression { return isUnix() } }
             steps {
                 script {
-                    String msg = "[dev1 / ${env.DEV1_NS}] LIVE: ${env.DEV1_LIVE_IMG}  ->  NEW: ${env.IMAGE_URI}  @ http://${env.DEV1_LB_IP} . Approve = old pod stops, new pod starts."
+                    String msg = "[dev1 / ${env.DEV1_NS}] NEW build ${env.IMAGE_URI} is Ready on slot '${env.DEV1_TARGET_SLOT}' (live: slot '${env.DEV1_LIVE_SLOT}' = ${env.DEV1_LIVE_IMG} @ http://${env.DEV1_LB_IP}). Approve = traffic -> '${env.DEV1_TARGET_SLOT}', then '${env.DEV1_LIVE_SLOT}' scales to 0."
                     timeout(time: 15, unit: 'MINUTES') {
                         input message: msg, ok: 'Switch Live'
                     }
@@ -122,7 +122,7 @@ pipeline {
         stage('Switch Live - dev1') {
             when { expression { return isUnix() } }
             steps {
-                script { switchLiveAndSmoke(env.DEV1_NS) }
+                script { switchLiveAndSmoke(env.DEV1_NS, 'DEV1') }
             }
         }
 
@@ -130,7 +130,7 @@ pipeline {
             when { expression { return isUnix() } }
             steps {
                 script {
-                    String msg = "dev1 is live @ http://${env.DEV1_LB_IP}. Deploy ${env.IMAGE_URI} to dev2 / ${env.DEV2_NS} (currently: ${env.DEV2_LIVE_IMG ?: 'not deployed yet'})?"
+                    String msg = "dev1 is live on slot '${env.DEV1_TARGET_SLOT}' @ http://${env.DEV1_LB_IP}. Deploy ${env.IMAGE_URI} to dev2 / ${env.DEV2_NS}? It goes to dev2's INACTIVE slot first - not live until you approve."
                     timeout(time: 15, unit: 'MINUTES') {
                         input message: msg, ok: 'Deploy to dev2'
                     }
@@ -149,7 +149,7 @@ pipeline {
             when { expression { return isUnix() } }
             steps {
                 script {
-                    String msg = "[dev2 / ${env.DEV2_NS}] LIVE: ${env.DEV2_LIVE_IMG}  ->  NEW: ${env.IMAGE_URI}  @ http://${env.DEV2_LB_IP} . Approve = old pod stops, new pod starts."
+                    String msg = "[dev2 / ${env.DEV2_NS}] NEW build ${env.IMAGE_URI} is Ready on slot '${env.DEV2_TARGET_SLOT}' (live: slot '${env.DEV2_LIVE_SLOT}' = ${env.DEV2_LIVE_IMG} @ http://${env.DEV2_LB_IP}). Approve = traffic -> '${env.DEV2_TARGET_SLOT}', then '${env.DEV2_LIVE_SLOT}' scales to 0."
                     timeout(time: 15, unit: 'MINUTES') {
                         input message: msg, ok: 'Switch Live'
                     }
@@ -160,38 +160,44 @@ pipeline {
         stage('Switch Live - dev2') {
             when { expression { return isUnix() } }
             steps {
-                script { switchLiveAndSmoke(env.DEV2_NS) }
+                script { switchLiveAndSmoke(env.DEV2_NS, 'DEV2') }
             }
         }
     }
 }
 
+def activeSlot(String ns) {
+    String live = sh(returnStdout: true,
+            script: "kubectl get service order-api -n ${ns} -o jsonpath='{.spec.selector.slot}' 2>/dev/null || true").trim()
+    return live ?: ''
+}
+
 def deployEnv(String ns, String label) {
     sh "gcloud container clusters get-credentials ${params.GKE_CLUSTER} --region=${params.GCP_REGION} --project=${params.GCP_PROJECT_ID} -q"
-    String liveImg = sh(returnStdout: true,
-            script: "kubectl get deployment order-api -n ${ns} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true").trim()
+    sh "kubectl get namespace ${ns} >/dev/null 2>&1 || kubectl create namespace ${ns}"
+    String live = activeSlot(ns)
+    String target = live ? (live == 'blue' ? 'green' : 'blue') : 'blue'
+    String liveImg = live ? sh(returnStdout: true,
+            script: "kubectl get deployment order-api-${live} -n ${ns} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true").trim() : ''
     String lbIp = sh(returnStdout: true,
             script: "kubectl get service order-api -n ${ns} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true").trim()
+    env."${label}_LIVE_SLOT" = live ?: 'none'
+    env."${label}_TARGET_SLOT" = target
     env."${label}_LIVE_IMG" = liveImg ?: 'none'
     env."${label}_LB_IP" = lbIp ?: 'pending'
-    echo "[${label}] ns=${ns} | LIVE: ${liveImg ?: 'none'} | STAGING: ${env.IMAGE_URI} | URL: http://${lbIp ?: 'pending'}"
+    echo "[${label}] ${ns}: LIVE slot='${live ?: 'none'}' (${liveImg ?: 'none'}) | NEW build ${env.IMAGE_URI} -> slot '${target}' | app URL http://${lbIp ?: 'pending'} (traffic NOT switched yet)"
     sh """
-        kubectl get namespace ${ns} >/dev/null 2>&1 || kubectl create namespace ${ns}
-        kubectl rollout resume deployment/order-api -n ${ns} 2>/dev/null || true
-        kubectl rollout pause deployment/order-api -n ${ns} 2>/dev/null || true
-        sed "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" k8s/deployment.yaml | kubectl apply -n ${ns} -f -
-        kubectl apply -n ${ns} -f k8s/service.yaml
-        kubectl get deployment order-api -n ${ns} -o wide
+        sed -e "s|IMAGE_PLACEHOLDER|${env.IMAGE_URI}|g" -e "s|SLOT_PLACEHOLDER|${target}|g" k8s/deployment.yaml | kubectl apply -n ${ns} -f -
+        kubectl rollout status deployment/order-api-${target} -n ${ns} --timeout=10m
+        kubectl wait --for=condition=ready pod -l app=order-api,slot=${target} -n ${ns} --timeout=5m
     """
 }
 
-def switchLiveAndSmoke(String ns) {
-    sh "kubectl rollout resume deployment/order-api -n ${ns} || true"
-    sh """
-        kubectl rollout status deployment/order-api -n ${ns} --timeout=10m
-        kubectl wait --for=condition=ready pod -l app=order-api -n ${ns} --timeout=5m
-        kubectl get endpoints order-api -n ${ns}
-    """
+def switchLiveAndSmoke(String ns, String label) {
+    String target = env."${label}_TARGET_SLOT"
+    String oldSlot = env."${label}_LIVE_SLOT"
+    echo "[${label}] Switching service selector -> slot '${target}'"
+    sh "sed 's|SLOT_PLACEHOLDER|${target}|g' k8s/service.yaml | kubectl apply -n ${ns} -f -"
     String ip = ''
     for (int i = 0; i < 30 && !ip; i++) {
         ip = sh(returnStdout: true,
@@ -199,7 +205,8 @@ def switchLiveAndSmoke(String ns) {
         if (!ip) { sleep time: 10, unit: 'SECONDS' }
     }
     if (!ip) { error "LoadBalancer IP not assigned for ${ns}" }
-    echo "SWITCHED LIVE: ${ns} -> ${env.IMAGE_URI} @ http://${ip}"
+    sh "kubectl get endpoints order-api -n ${ns}"
+    echo "SWITCHED LIVE: ${ns} -> slot '${target}' (${env.IMAGE_URI}) @ http://${ip}"
     sh """
         set -e
         healthy=""
@@ -211,5 +218,9 @@ def switchLiveAndSmoke(String ns) {
         curl -fs "http://${ip}/api/orders/1001" | grep -q '"orderId":1001' || { echo "SMOKE FAILED: ${ns} /api/orders/1001"; exit 1; }
         echo "SMOKE PASSED (${ns}): http://${ip}/api/orders/1001"
     """
-    currentBuild.description = (currentBuild.description ? currentBuild.description + ' | ' : '') + "${ns}: http://${ip}"
+    if (oldSlot && oldSlot != 'none') {
+        sh "kubectl scale deployment order-api-${oldSlot} -n ${ns} --replicas=0"
+        echo "[${label}] Old slot '${oldSlot}' scaled to 0 - only '${target}' pod is running"
+    }
+    currentBuild.description = (currentBuild.description ? currentBuild.description + ' | ' : '') + "${ns} slot=${target}: http://${ip}"
 }

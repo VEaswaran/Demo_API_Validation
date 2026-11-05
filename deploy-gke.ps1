@@ -85,11 +85,20 @@ Invoke-Checked { & $gcloud container clusters get-credentials $ClusterName --reg
 if (-not (Test-CommandSuccess { kubectl get namespace $Namespace })) {
     Invoke-Checked { kubectl create namespace $Namespace }
 }
-kubectl rollout resume deployment/order-api -n $Namespace 2>$null | Out-Null
-(Get-Content "$PSScriptRoot\k8s\deployment.yaml" -Raw) -replace "IMAGE_PLACEHOLDER", $image | kubectl apply -n $Namespace -f -
+$liveSlot = (kubectl get service order-api -n $Namespace -o jsonpath="{.spec.selector.slot}" 2>$null)
+if ($liveSlot) { $liveSlot = $liveSlot.Trim() }
+$Slot = if ($liveSlot -eq "blue") { "green" } else { "blue" }
+Write-Host "==> Live slot: $(if ($liveSlot) { $liveSlot } else { 'none' }) | deploying new build to slot '$Slot'"
+
+(Get-Content "$PSScriptRoot\k8s\deployment.yaml" -Raw) -replace "IMAGE_PLACEHOLDER", $image -replace "SLOT_PLACEHOLDER", $Slot | kubectl apply -n $Namespace -f -
 if ($LASTEXITCODE -ne 0) { throw "kubectl apply deployment failed" }
-Invoke-Checked { kubectl apply -n $Namespace -f "$PSScriptRoot\k8s\service.yaml" }
-Invoke-Checked { kubectl rollout status deployment/order-api -n $Namespace --timeout=10m }
+Invoke-Checked { kubectl rollout status "deployment/order-api-$Slot" -n $Namespace --timeout=10m }
+(Get-Content "$PSScriptRoot\k8s\service.yaml" -Raw) -replace "SLOT_PLACEHOLDER", $Slot | kubectl apply -n $Namespace -f -
+if ($LASTEXITCODE -ne 0) { throw "kubectl apply service failed" }
+if ($liveSlot -and $liveSlot -ne $Slot) {
+    Write-Host "==> Traffic switched to slot '$Slot'; scaling down old slot '$liveSlot'"
+    Invoke-Checked { kubectl scale deployment "order-api-$liveSlot" -n $Namespace --replicas=0 }
+}
 
 Write-Host "==> Waiting for external IP"
 $ip = ""
