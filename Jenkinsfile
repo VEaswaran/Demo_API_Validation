@@ -5,20 +5,17 @@
 //   QG2 = Integration Tests
 //   QG3 = Coverage Gate (JaCoCo)
 //   QG4 = Security Scan (Snyk)
+//
+// Promotion Environments (each maps to its own GCP Project & GKE Cluster in shared-library resources/environments.json):
+//   Available: dev1, dev2, test, perf, stage, prod
 springGkePipeline(
-    appName:      'order-api',
-    QG:           ['QG1', 'QG2', 'QG3', 'QG4'],
-    gcpProjectId: 'project-d7b18774-cce1-4b87-a4a',
-    gcpRegion:    'us-central1',
-    gkeCluster:   'order-api-cluster',
-    arRepo:       'order-api',
-    imageName:    'order-api',
-    dev1Ns:       'order-api-dev1',
-    dev2Ns:       'order-api-dev2',
-    snykScanJob:  'order-api-snyk-scan',
-    healthPath:   '/actuator/health',
-    smokePath:    '/api/orders/1001',
-    smokeExpect:  '"orderId":1001'
+    appName:     'order-api',
+    QG:          ['QG1', 'QG2', 'QG3', 'QG4'],
+    promoteTo:   ['dev1', 'dev2'],
+    healthPath:  '/actuator/health',
+    smokePath:   '/api/orders/1001',
+    smokeExpect: '"orderId":1001'
 )
+
 
 
