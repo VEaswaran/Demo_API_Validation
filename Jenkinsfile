@@ -186,6 +186,18 @@ pipeline {
             }
         }
     }
+
+    post {
+        always {
+            script {
+                if (isUnix()) {
+                    // Reap orphaned shell wrappers leaked by aborted/failed builds
+                    // (durable-task zombies that spin CPU on the Jenkins pod).
+                    sh 'pkill -9 -P 1 -x sh 2>/dev/null; pkill -9 -P 1 -x bash 2>/dev/null; true'
+                }
+            }
+        }
+    }
 }
 
 def activeSlot(String ns) {
