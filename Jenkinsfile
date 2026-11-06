@@ -191,9 +191,15 @@ pipeline {
         always {
             script {
                 if (isUnix()) {
-                    // Reap orphaned shell wrappers leaked by aborted/failed builds
-                    // (durable-task zombies that spin CPU on the Jenkins pod).
-                    sh 'pkill -9 -P 1 -x sh 2>/dev/null; pkill -9 -P 1 -x bash 2>/dev/null; true'
+                    // Reap orphaned shell wrappers leaked by PREVIOUS aborted/failed
+                    // builds (durable-task zombies that spin CPU on the Jenkins pod).
+                    // Only kill wrappers older than 30 min - this build's own
+                    // durable-task monitor is also PPID=1 but freshly spawned.
+                    sh '''
+                        ps -eo pid,ppid,etimes,comm \
+                          | awk '$2 == 1 && $3 > 1800 && ($4 == "sh" || $4 == "bash") { print $1 }' \
+                          | xargs -r kill -9 2>/dev/null || true
+                    '''
                 }
             }
         }
