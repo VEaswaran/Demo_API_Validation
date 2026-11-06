@@ -8,5 +8,6 @@ RUN jenkins-plugin-cli -f /usr/share/jenkins/ref/plugins.txt
 
 USER root
 COPY security-scan-job.groovy /usr/share/jenkins/ref/init.groovy.d/security-scan-job.groovy
-RUN chown jenkins:jenkins /usr/share/jenkins/ref/init.groovy.d/security-scan-job.groovy
+COPY shared-library.groovy /usr/share/jenkins/ref/init.groovy.d/shared-library.groovy
+RUN chown jenkins:jenkins /usr/share/jenkins/ref/init.groovy.d/*.groovy
 USER jenkins
